@@ -155,14 +155,17 @@ def process_answer(params)
 
     elsif is_question_format?(user_answer) && is_correct_answer?(current_answer, user_answer)
       score = update_score(user_id, current_question["value"])
+      record_stats(user_id, "correct")
       reply = "That is the correct answer, #{get_slack_name(user_id)}. Your total score is #{currency_format(score)}."
       mark_question_as_answered(params[:channel_id])
     elsif is_correct_answer?(current_answer, user_answer)
       score = update_score(user_id, (current_question["value"] * -1))
+      record_stats(user_id, "not_question")
       reply = "That is correct, #{get_slack_name(user_id)}, but responses have to be in the form of a question. Your total score is #{currency_format(score)}."
       $redis.setex(answered_key, ENV["SECONDS_TO_ANSWER"], "true")
     else
       score = update_score(user_id, (current_question["value"] * -1))
+      record_stats(user_id, "incorrect")
       reply = "That is incorrect, #{get_slack_name(user_id)}. Your score is now #{currency_format(score)}."
       $redis.setex(answered_key, ENV["SECONDS_TO_ANSWER"], "true")
     end
@@ -180,6 +183,14 @@ def currency_format(number, currency = "$")
     moneys.to_s.gsub!(/(\d+)(\d\d\d)/, "\\1,\\2")
   end
   "#{prefix}#{moneys}"
+end
+
+# Formats a number as percentage
+# For example .23221 becomes "23.22%"
+#
+def percent_format(number, decimal_places = 2)
+  percentage = number * 100
+  "%.2f%%" % percentage
 end
 
 # Checks if the respose is in the form of a question:
@@ -268,6 +279,34 @@ def update_score(user_id, score = 0)
   end
 end
 
+# Gets the percentage of questions a user has gotten correct
+# returned as a float between 0 and 1
+#
+def get_percent_correct(user_id)
+  key = "stats:#{user_id}"
+  correct = $redis.hget(key, "correct").to_f
+  incorrect = $redis.hget(key, "incorrect").to_f
+  not_question = $redis.hget(key, "not_question").to_f
+
+  total = correct + incorrect + not_question
+  correct/total
+end
+
+# Records stats for a given user
+#
+def record_stats(user_id, stat_name)
+  key = "stats:#{user_id}"
+  user_stat_value = $redis.hget(key, stat_name)
+  if user_stat_value.nil?
+    $redis.hset(key, stat_name, 1)
+    1
+  else
+    new_value = user_stat_value.to_i + 1
+    $redis.hset(key, stat_name, new_value)
+    new_value
+  end
+end
+
 # Gets the given user's name(s) from redis.
 # If it's not in redis, makes an API request to Slack to get it,
 # and caches it in redis for a month.
@@ -327,7 +366,8 @@ def respond_with_leaderboard
       user_id = leader[:user_id]
       name = get_slack_name(leader[:user_id], { :use_real_name => true })
       score = currency_format(get_user_score(user_id))
-      leaders << "#{i + 1}. #{name}: #{score}"
+      percent_correct = percent_format(get_percent_correct(leader[:user_id]))
+      leaders << "#{i + 1}. #{name}: #{score} (#{percent_correct} correct)"
     end
     if leaders.size > 0
       response = "Let's take a look at the top scores:\n\n#{leaders.join("\n")}"
@@ -351,7 +391,8 @@ def respond_with_loserboard
       user_id = leader[:user_id]
       name = get_slack_name(leader[:user_id], { :use_real_name => true })
       score = currency_format(get_user_score(user_id))
-      leaders << "#{i + 1}. #{name}: #{score}"
+      percent_incorrect = percent_format(1 - get_percent_correct(leader[:user_id]))
+      leaders << "#{i + 1}. #{name}: #{score} (#{percent_incorrect} incorrect)"
     end
     if leaders.size > 0
       response = "Let's take a look at the bottom scores:\n\n#{leaders.join("\n")}"
